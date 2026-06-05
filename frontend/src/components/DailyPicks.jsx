@@ -390,10 +390,32 @@ function AccuracyBadge({ data, loading }) {
     pct >= 70 ? 'bg-emerald-500/20 text-emerald-300 ring-emerald-500/30'
     : pct >= 55 ? 'bg-blue-500/20 text-blue-300 ring-blue-500/30'
     : 'bg-amber-500/20 text-amber-300 ring-amber-500/30'
+  const recent = data.recent_hits ?? []
   return (
-    <span className={['rounded-full px-3 py-1 text-xs font-medium ring-1', tone].join(' ')}>
-      {pct?.toFixed(1)}% accurate over last 30 days ({data.correct_predictions}/{data.total_picks})
-    </span>
+    <div className="flex flex-col items-end gap-1.5">
+      <span className={['rounded-full px-3 py-1 text-xs font-medium ring-1', tone].join(' ')}>
+        {pct?.toFixed(1)}% accurate over last 30 days ({data.correct_predictions}/{data.total_picks})
+      </span>
+      {recent.length > 0 && (
+        <div className="flex flex-wrap justify-end gap-1.5 max-w-[28rem]">
+          <span className="text-[11px] uppercase tracking-wide text-slate-500 self-center">
+            Recent hits:
+          </span>
+          {recent.map((h) => (
+            <span
+              key={`${h.player_id}-${h.game_date}`}
+              title={`${h.player_name} — ${(h.predicted_probability * 100).toFixed(1)}% predicted on ${h.game_date}`}
+              className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300 ring-1 ring-emerald-500/20"
+            >
+              {h.player_name}
+              <span className="ml-1 text-emerald-200/60">
+                {(h.predicted_probability * 100).toFixed(0)}%
+              </span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

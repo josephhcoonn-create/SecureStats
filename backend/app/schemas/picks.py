@@ -81,6 +81,16 @@ class AccuracyByConfidence(BaseModel):
     accuracy_pct: float | None
 
 
+class RecentHit(BaseModel):
+    """One correctly-predicted hit, surfaced for the accuracy badge."""
+
+    player_id: int
+    player_name: str
+    game_date: _date
+    predicted_probability: float
+    confidence: int
+
+
 class ModelAccuracyResponse(BaseModel):
     """Headline accuracy stats sourced from the PickHistory table —
     picks snapshotted at prediction time and graded by the daily ETL."""
@@ -97,3 +107,7 @@ class ModelAccuracyResponse(BaseModel):
         None, description="Mean predicted_probability across INCORRECT picks"
     )
     by_confidence: list[AccuracyByConfidence]
+    recent_hits: list[RecentHit] = Field(
+        default_factory=list,
+        description="Up to 6 most recent correctly-predicted hits (player name + game date)",
+    )

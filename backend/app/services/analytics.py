@@ -1150,6 +1150,7 @@ async def get_model_accuracy(
             "avg_prob_correct": None,
             "avg_prob_incorrect": None,
             "by_confidence": [],
+            "recent_hits": [],
         }
 
     correct_rows = [r for r in rows if r.actual_result == "hit"]
@@ -1200,6 +1201,39 @@ async def get_model_accuracy(
         for tier, data in tiers.items()
     ]
 
+    # Recent correct hits with player names — six most recent, ordered
+    # by game date desc then by predicted probability desc as a tiebreak.
+    recent_rows = (
+        await session.execute(
+            select(
+                PickHistory.player_id,
+                Player.name,
+                Game.date,
+                PickHistory.predicted_probability,
+                PickHistory.confidence,
+            )
+            .join(Player, Player.id == PickHistory.player_id)
+            .join(Game, Game.id == PickHistory.game_id)
+            .where(
+                PickHistory.created_at >= cutoff,
+                PickHistory.actual_result == "hit",
+            )
+            .order_by(Game.date.desc(), PickHistory.predicted_probability.desc())
+            .limit(6)
+        )
+    ).all()
+
+    recent_hits = [
+        {
+            "player_id": pid,
+            "player_name": name,
+            "game_date": gdate,
+            "predicted_probability": round(prob, 3),
+            "confidence": conf,
+        }
+        for pid, name, gdate, prob, conf in recent_rows
+    ]
+
     return {
         "days": days,
         "total_picks": total,
@@ -1209,6 +1243,7 @@ async def get_model_accuracy(
         "avg_prob_correct": avg_prob_correct,
         "avg_prob_incorrect": avg_prob_incorrect,
         "by_confidence": by_confidence,
+        "recent_hits": recent_hits,
     }
 
 
