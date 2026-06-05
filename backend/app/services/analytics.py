@@ -1207,7 +1207,7 @@ async def get_model_accuracy(
         await session.execute(
             select(
                 PickHistory.player_id,
-                Player.name,
+                Player.full_name,
                 Game.date,
                 PickHistory.predicted_probability,
                 PickHistory.confidence,
