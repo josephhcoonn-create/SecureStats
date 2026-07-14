@@ -44,6 +44,49 @@ const handednessLabel = (mod) => {
   return { text: 'Same-hand penalty', sigil: '✗', tone: 'text-red-300' }
 }
 
+// Recent-form arrow for the pitcher's last-3-starts ERA vs. season ERA.
+// Arrow color follows the ERA direction (up/worse = red, down/better = green).
+const trendArrow = (trending) => {
+  if (trending === 'struggling') return { arrow: '↑', label: 'Struggling', tone: 'text-red-400' }
+  if (trending === 'locked_in') return { arrow: '↓', label: 'Locked in', tone: 'text-emerald-400' }
+  if (trending === 'steady') return { arrow: '–', label: 'Steady', tone: 'text-slate-400' }
+  return null
+}
+
+// Quick-scan badges for the collapsed card. Colors reflect BATTER advantage:
+// a struggling pitcher or an owned matchup is green (good for the hitter);
+// a locked-in pitcher is red (bad for the hitter).
+const matchupBadges = (f) => {
+  if (!f) return []
+  const badges = []
+  if (f.h2h_avg != null && f.h2h_avg > 0.3 && (f.h2h_at_bats ?? 0) >= 10) {
+    badges.push({ text: 'Owns SP', tone: 'bg-emerald-500/20 text-emerald-300 ring-emerald-500/30' })
+  }
+  if (f.pitcher_trending === 'struggling') {
+    badges.push({ text: 'SP Struggling', tone: 'bg-emerald-500/20 text-emerald-300 ring-emerald-500/30' })
+  }
+  if (f.pitcher_trending === 'locked_in') {
+    badges.push({ text: 'SP Locked In', tone: 'bg-red-500/20 text-red-300 ring-red-500/30' })
+  }
+  return badges
+}
+
+// Composite matchup-advantage score: good H2H (higher avg) against a
+// struggling pitcher (higher recent ERA) floats to the top. ERA (~0-12) is
+// scaled into the batting-average range so both terms carry real weight.
+const matchupScore = (p) => {
+  const f = p.factors || {}
+  const h2h = f.h2h_avg ?? 0
+  const era = f.pitcher_recent_era ?? f.pitcher_season_era ?? 0
+  return h2h + era / 20
+}
+
+const SORT_LABELS = {
+  probability: 'probability',
+  confidence: 'confidence',
+  matchup: 'matchup advantage',
+}
+
 export default function DailyPicks() {
   const [sortBy, setSortBy] = useState('probability')
   const [minConf, setMinConf] = useState(50)
@@ -77,11 +120,11 @@ export default function DailyPicks() {
   const sortedPicks = useMemo(() => {
     const picks = picksQuery.data?.picks ?? []
     const filtered = picks.filter((p) => p.confidence >= minConf)
-    return filtered.sort((a, b) =>
-      sortBy === 'probability'
-        ? b.probability - a.probability
-        : b.confidence - a.confidence,
-    )
+    return filtered.sort((a, b) => {
+      if (sortBy === 'probability') return b.probability - a.probability
+      if (sortBy === 'confidence') return b.confidence - a.confidence
+      return matchupScore(b) - matchupScore(a)
+    })
   }, [picksQuery.data, sortBy, minConf])
 
   const toggleExpanded = (id) => {
@@ -106,7 +149,7 @@ export default function DailyPicks() {
       <div className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-900/60 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2 text-sm">
           <span className="text-slate-400">Sort:</span>
-          {['probability', 'confidence'].map((opt) => (
+          {['probability', 'confidence', 'matchup'].map((opt) => (
             <button
               key={opt}
               onClick={() => setSortBy(opt)}
@@ -117,7 +160,7 @@ export default function DailyPicks() {
                   : 'bg-slate-800 text-slate-300 hover:bg-slate-700',
               ].join(' ')}
             >
-              {opt}
+              {SORT_LABELS[opt]}
             </button>
           ))}
         </div>
@@ -221,6 +264,7 @@ function PickCard({ pick, expanded, onToggle }) {
   const tier = CONF_TIER(pick.confidence)
   const pct = Math.round(pick.probability * 1000) / 10
   const ringData = [{ name: 'p', value: pct, fill: ringColor(pick.probability) }]
+  const badges = matchupBadges(pick.factors)
 
   return (
     <article className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/60">
@@ -261,6 +305,18 @@ function PickCard({ pick, expanded, onToggle }) {
               </>
             )}
           </p>
+          {badges.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {badges.map((b) => (
+                <span
+                  key={b.text}
+                  className={['rounded px-1.5 py-0.5 text-[10px] font-semibold ring-1', b.tone].join(' ')}
+                >
+                  {b.text}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
 
         <span
@@ -286,6 +342,8 @@ function PickCard({ pick, expanded, onToggle }) {
 function PickDetails({ pick }) {
   const f = pick.factors || {}
   const hand = handednessLabel(f.handedness_matchup)
+  const seasonEra = f.pitcher_season_era ?? f.pitcher_era
+  const trend = trendArrow(f.pitcher_trending)
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -300,11 +358,31 @@ function PickDetails({ pick }) {
           <Row label="Home/away split" value={fmtAvg(f.home_away_split)} />
         </dl>
 
+        {/* ── Head-to-head ── */}
+        <H2HSection f={f} pitcherName={pick.pitcher_name} />
+
         <p className="mt-3 mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">
-          Matchup
+          Pitcher form
         </p>
         <dl className="space-y-1.5 text-sm">
-          <Row label="Opposing pitcher ERA" value={fmtFloat(f.pitcher_era, 2)} />
+          <Row label="Season ERA" value={fmtFloat(seasonEra, 2)} />
+          <Row
+            label="Last 3 starts ERA"
+            value={
+              f.pitcher_recent_era == null ? (
+                <span className="text-slate-500">— (need 3 starts)</span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="tabular-nums">{fmtFloat(f.pitcher_recent_era, 2)}</span>
+                  {trend && (
+                    <span className={['font-medium', trend.tone].join(' ')}>
+                      {trend.arrow} {trend.label}
+                    </span>
+                  )}
+                </span>
+              )
+            }
+          />
           <Row label="Opposing pitcher WHIP" value={fmtFloat(f.pitcher_whip, 2)} />
           <Row
             label="Handedness"
@@ -325,6 +403,64 @@ function PickDetails({ pick }) {
         <OddsForPick odds={pick.odds} />
       </div>
     </div>
+  )
+}
+
+function H2HSection({ f, pitcherName }) {
+  const hasH2H = f.h2h_avg != null
+  const label = (
+    <p className="mt-3 mb-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+      Head-to-head
+    </p>
+  )
+
+  if (!hasH2H) {
+    return (
+      <>
+        {label}
+        <p className="rounded-md bg-slate-900/40 px-2.5 py-2 text-sm italic text-slate-500">
+          First career matchup
+        </p>
+      </>
+    )
+  }
+
+  const ab = f.h2h_at_bats ?? 0
+  // Green when the batter's history vs this pitcher beats his season avg
+  // (owns the matchup); red when it lags (struggles). Neutral if unknown.
+  const owns = f.season_avg != null ? f.h2h_avg > f.season_avg : null
+  const barTone =
+    owns === true ? 'bg-emerald-500' : owns === false ? 'bg-red-500' : 'bg-slate-500'
+  const textTone =
+    owns === true ? 'text-emerald-300' : owns === false ? 'text-red-300' : 'text-slate-200'
+  const sample = ab >= 15 ? 'Strong sample' : ab >= 5 ? 'Limited sample' : 'Minimal sample'
+  // Bar scales .000–.500 → 0–100%, floored so a non-zero avg is always visible.
+  const barPct = Math.max(3, Math.min(100, (f.h2h_avg / 0.5) * 100))
+
+  return (
+    <>
+      {label}
+      <div className="space-y-1.5 rounded-md bg-slate-900/40 px-2.5 py-2">
+        <div className="flex items-baseline justify-between text-sm">
+          <span className="truncate text-slate-400">
+            vs. {pitcherName || 'this pitcher'}
+          </span>
+          <span className={['font-medium tabular-nums', textTone].join(' ')}>
+            {fmtAvg(f.h2h_avg)} ({ab} AB{ab === 1 ? '' : 's'})
+          </span>
+        </div>
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+          <div
+            className={['h-full rounded-full', barTone].join(' ')}
+            style={{ width: `${barPct}%` }}
+          />
+        </div>
+        <p className="text-[11px] text-slate-500">
+          {sample}
+          {owns === true ? ' · owns this matchup' : owns === false ? ' · struggles here' : ''}
+        </p>
+      </div>
+    </>
   )
 }
 

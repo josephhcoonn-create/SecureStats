@@ -76,7 +76,7 @@ class TestSchedulerRegistration:
     """Drive start_scheduler() and confirm every job we expect is present.
     Then shut down so we don't leak background tasks into other tests."""
 
-    def test_all_five_jobs_registered(self) -> None:
+    def test_all_jobs_registered(self) -> None:
         from app.etl import scheduler as sched_mod
 
         # Use a fresh scheduler so prior test runs don't pollute
@@ -90,6 +90,7 @@ class TestSchedulerRegistration:
                 "live_update",
                 "fetch_daily_odds",
                 "fetch_odds_update",
+                "update_matchup_data",
                 "generate_daily_picks",
             }
         finally:

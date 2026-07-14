@@ -1,0 +1,59 @@
+{
+  "copyright": "Copyright 2026 MLB Advanced Media, L.P.",
+  "stats": [
+    {
+      "type": { "displayName": "vsPlayer" },
+      "group": { "displayName": "hitting" },
+      "totalSplits": 3,
+      "splits": [
+        {
+          "season": "2024",
+          "stat": {
+            "gamesPlayed": 4, "atBats": 9, "hits": 3, "homeRuns": 1,
+            "strikeOuts": 2, "baseOnBalls": 1, "avg": ".333", "obp": ".400",
+            "slg": ".667"
+          }
+        },
+        {
+          "season": "2025",
+          "stat": {
+            "gamesPlayed": 5, "atBats": 8, "hits": 2, "homeRuns": 1,
+            "strikeOuts": 2, "baseOnBalls": 0, "avg": ".250", "obp": ".250",
+            "slg": ".500"
+          }
+        },
+        {
+          "season": "2026",
+          "stat": {
+            "gamesPlayed": 4, "atBats": 8, "hits": 3, "homeRuns": 0,
+            "strikeOuts": 1, "baseOnBalls": 2, "avg": ".375", "obp": ".500",
+            "slg": ".500"
+          }
+        }
+      ]
+    },
+    {
+      "type": { "displayName": "vsPlayerTotal" },
+      "group": { "displayName": "hitting" },
+      "totalSplits": 1,
+      "splits": [
+        {
+          "stat": {
+            "gamesPlayed": 13,
+            "atBats": 25,
+            "hits": 8,
+            "homeRuns": 2,
+            "strikeOuts": 5,
+            "baseOnBalls": 3,
+            "avg": ".320",
+            "obp": ".393",
+            "slg": ".560",
+            "ops": ".953"
+          },
+          "pitcher": { "id": 543037, "fullName": "Gerrit Cole" },
+          "batter": { "id": 545361, "fullName": "Mike Trout" }
+        }
+      ]
+    }
+  ]
+}

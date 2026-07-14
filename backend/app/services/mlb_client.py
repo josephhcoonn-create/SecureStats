@@ -87,6 +87,42 @@ class ProbablePitcherInfo(TypedDict):
     away_pitcher_name: str | None
 
 
+class BatterVsPitcherStats(TypedDict):
+    """Career head-to-head batting line for one batter vs one pitcher."""
+    batter_id: int
+    pitcher_id: int
+    at_bats: int
+    hits: int
+    home_runs: int
+    batting_avg: float | None
+    on_base_pct: float | None
+    slugging_pct: float | None
+    strikeouts: int
+
+
+class PitcherRecentGame(TypedDict):
+    """One game-log line from a pitcher's recent-form window."""
+    date: str
+    opponent: str
+    innings_pitched: float
+    hits_allowed: int
+    earned_runs: int
+    walks: int
+    strikeouts: int
+    era: float | None
+    whip: float | None
+
+
+class PitcherRecentForm(TypedDict):
+    """A pitcher's last-N-games breakdown plus aggregates over that window."""
+    pitcher_id: int
+    num_games: int
+    games: list[PitcherRecentGame]
+    recent_era: float | None
+    recent_whip: float | None
+    recent_batting_avg_against: float | None
+
+
 class RosterEntry(TypedDict):
     player_id: int
     full_name: str
@@ -435,6 +471,191 @@ class MLBClient:
             "get_probable_pitchers(%s): %d games", d, len(results)
         )
         return results
+
+    # ── Matchup factors: H2H history + recent pitcher form ──────────────────
+
+    async def get_batter_vs_pitcher(
+        self, batter_id: int, pitcher_id: int
+    ) -> BatterVsPitcherStats | None:
+        """
+        Career head-to-head batting line for *batter_id* against *pitcher_id*.
+
+        Calls ``GET /people/{batter_id}/stats
+        ?stats=vsPlayer,vsPlayerTotal&opposingPlayerId={pitcher_id}&group=hitting``.
+
+        Reads the ``vsPlayerTotal`` split — MLB's pre-aggregated career line
+        across every season the pair has faced each other — rather than the
+        per-season ``vsPlayer`` splits, because rate stats (avg/obp/slg)
+        cannot be correctly recombined from season splits by hand.
+
+        Returns ``None`` when:
+          - they have never faced each other (200 with no splits, or 0 AB), or
+          - a player id is unknown to the API (404 — common for minor leaguers).
+
+        Rate limiting is handled by the shared token-bucket limiter (≤10/s),
+        so no per-call sleep is added here even when called once per batter.
+        """
+        params = {
+            "stats": "vsPlayer,vsPlayerTotal",
+            "opposingPlayerId": pitcher_id,
+            "group": "hitting",
+        }
+        try:
+            data = await self._get(f"/people/{batter_id}/stats", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    "get_batter_vs_pitcher: batter %d / pitcher %d not found (404)",
+                    batter_id,
+                    pitcher_id,
+                )
+                return None
+            raise
+
+        # Prefer the single pre-aggregated career-total split.
+        total_split: dict | None = None
+        for block in data.get("stats", []):
+            if block.get("type", {}).get("displayName") == "vsPlayerTotal":
+                splits = block.get("splits", [])
+                if splits:
+                    total_split = splits[0]
+                    break
+
+        if total_split is None:
+            logger.info(
+                "get_batter_vs_pitcher(%d vs %d): no head-to-head history",
+                batter_id,
+                pitcher_id,
+            )
+            return None
+
+        stat = total_split.get("stat", {})
+        at_bats = int(stat.get("atBats", 0))
+        if at_bats == 0:
+            # Only walks / HBP on record — no usable batting sample.
+            return None
+
+        return BatterVsPitcherStats(
+            batter_id=batter_id,
+            pitcher_id=pitcher_id,
+            at_bats=at_bats,
+            hits=int(stat.get("hits", 0)),
+            home_runs=int(stat.get("homeRuns", 0)),
+            batting_avg=self._safe_float(stat.get("avg")),
+            on_base_pct=self._safe_float(stat.get("obp")),
+            slugging_pct=self._safe_float(stat.get("slg")),
+            strikeouts=int(stat.get("strikeOuts", 0)),
+        )
+
+    async def get_pitcher_recent_games(
+        self, pitcher_id: int, num_games: int = 3, season: int | None = None
+    ) -> PitcherRecentForm | None:
+        """
+        Recent-form pitching stats: *pitcher_id*'s most recent ``num_games``
+        game-log entries for *season* (default: current year), plus aggregates
+        across that window.
+
+        Calls ``GET /people/{pitcher_id}/stats
+        ?stats=gameLog&group=pitching&season={season}``.
+
+        Per-game ``era`` / ``whip`` are recomputed from parsed innings (MLB
+        encodes '6.1' as 6⅓) so they stay consistent with the aggregates:
+
+          - ``recent_era``  = Σ earned_runs / Σ innings × 9
+          - ``recent_whip`` = Σ (walks + hits) / Σ innings
+          - ``recent_batting_avg_against`` = Σ hits / Σ batters_faced
+            (falls back to hits / (innings×3 + hits + walks) when the game
+            log omits ``battersFaced``)
+
+        Returns ``None`` when the pitcher has no game log for the season, or
+        on a 404. If fewer than ``num_games`` starts exist, uses all of them.
+
+        Rate limiting is handled by the shared token-bucket limiter (≤10/s).
+        """
+        yr = season or date.today().year
+        params = {"stats": "gameLog", "group": "pitching", "season": yr}
+        try:
+            data = await self._get(f"/people/{pitcher_id}/stats", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                logger.warning(
+                    "get_pitcher_recent_games: pitcher %d not found (404)", pitcher_id
+                )
+                return None
+            raise
+
+        stats_blocks = data.get("stats", [])
+        splits = stats_blocks[0].get("splits", []) if stats_blocks else []
+        if not splits:
+            logger.info(
+                "get_pitcher_recent_games(%d): no game log for season %s",
+                pitcher_id,
+                yr,
+            )
+            return None
+
+        # Game log comes chronological ascending; sort by date desc, take N.
+        splits_sorted = sorted(splits, key=lambda s: s.get("date", ""), reverse=True)
+        recent = splits_sorted[:num_games]
+
+        games: list[PitcherRecentGame] = []
+        tot_ip = 0.0
+        tot_er = 0
+        tot_bb = 0
+        tot_hits = 0
+        tot_bf = 0
+        for sp in recent:
+            st = sp.get("stat", {})
+            ip = self._parse_innings(st.get("inningsPitched"))
+            hits = int(st.get("hits", 0))
+            er = int(st.get("earnedRuns", 0))
+            bb = int(st.get("baseOnBalls", 0))
+            k = int(st.get("strikeOuts", 0))
+            bf = int(st.get("battersFaced", 0))
+            games.append(
+                PitcherRecentGame(
+                    date=sp.get("date", ""),
+                    opponent=(sp.get("opponent") or {}).get("name", "Unknown"),
+                    innings_pitched=round(ip, 3),
+                    hits_allowed=hits,
+                    earned_runs=er,
+                    walks=bb,
+                    strikeouts=k,
+                    era=round(er / ip * 9, 2) if ip > 0 else None,
+                    whip=round((bb + hits) / ip, 2) if ip > 0 else None,
+                )
+            )
+            tot_ip += ip
+            tot_er += er
+            tot_bb += bb
+            tot_hits += hits
+            tot_bf += bf
+
+        recent_era = round(tot_er / tot_ip * 9, 2) if tot_ip > 0 else None
+        recent_whip = round((tot_bb + tot_hits) / tot_ip, 2) if tot_ip > 0 else None
+        if tot_bf > 0:
+            recent_baa: float | None = round(tot_hits / tot_bf, 3)
+        elif tot_ip > 0:
+            approx_bf = tot_ip * 3 + tot_hits + tot_bb
+            recent_baa = round(tot_hits / approx_bf, 3) if approx_bf > 0 else None
+        else:
+            recent_baa = None
+
+        logger.info(
+            "get_pitcher_recent_games(%d): %d games, recent_era=%s recent_whip=%s",
+            pitcher_id,
+            len(games),
+            recent_era,
+            recent_whip,
+        )
+        return PitcherRecentForm(
+            pitcher_id=pitcher_id,
+            num_games=len(games),
+            games=games,
+            recent_era=recent_era,
+            recent_whip=recent_whip,
+            recent_batting_avg_against=recent_baa,
+        )
 
     @staticmethod
     def _parse_innings(raw: object) -> float:

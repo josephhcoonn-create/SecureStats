@@ -177,6 +177,25 @@ class EnhancedHitProbFactors(BaseModel):
         ..., description="+0.015 opposite hand, -0.010 same hand, 0 unknown"
     )
     league_avg: float = Field(..., description="League-wide baseline batting avg")
+    # ── Head-to-head + recent-pitcher-form factors ──
+    h2h_avg: float | None = Field(
+        None, description="Batter's career avg vs this pitcher (null if no data)"
+    )
+    h2h_at_bats: int = Field(
+        0, description="H2H sample size — drives the dynamic H2H weight"
+    )
+    h2h_weight_applied: float = Field(
+        0.0, description="Weight actually given to H2H: 0, 0.075, or 0.15"
+    )
+    pitcher_recent_era: float | None = Field(
+        None, description="Pitcher's ERA over last 3 starts (null if <3 logged)"
+    )
+    pitcher_season_era: float | None = Field(
+        None, description="Pitcher's season ERA, for the recent-vs-season comparison"
+    )
+    pitcher_trending: str | None = Field(
+        None, description="'struggling' | 'steady' | 'locked_in' (null if <3 starts)"
+    )
 
 
 class EnhancedHitProbabilityResponse(BaseModel):

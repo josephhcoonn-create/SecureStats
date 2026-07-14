@@ -1,0 +1,44 @@
+{
+  "copyright": "Copyright 2026 MLB Advanced Media, L.P.",
+  "stats": [
+    {
+      "type": { "displayName": "gameLog" },
+      "group": { "displayName": "pitching" },
+      "splits": [
+        {
+          "season": "2026",
+          "date": "2026-06-24",
+          "isHome": true,
+          "opponent": { "id": 111, "name": "Boston Red Sox" },
+          "stat": {
+            "inningsPitched": "4.0", "hits": 8, "earnedRuns": 5,
+            "baseOnBalls": 3, "strikeOuts": 2, "battersFaced": 22,
+            "era": "11.25", "whip": "2.75"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-06-30",
+          "isHome": false,
+          "opponent": { "id": 147, "name": "New York Yankees" },
+          "stat": {
+            "inningsPitched": "3.2", "hits": 7, "earnedRuns": 6,
+            "baseOnBalls": 2, "strikeOuts": 3, "battersFaced": 21,
+            "era": "14.73", "whip": "2.45"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-07-05",
+          "isHome": true,
+          "opponent": { "id": 139, "name": "Tampa Bay Rays" },
+          "stat": {
+            "inningsPitched": "5.0", "hits": 9, "earnedRuns": 4,
+            "baseOnBalls": 1, "strikeOuts": 4, "battersFaced": 24,
+            "era": "7.20", "whip": "2.00"
+          }
+        }
+      ]
+    }
+  ]
+}

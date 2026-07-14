@@ -16,6 +16,11 @@ fetch_daily_odds    — runs refresh_odds_for_date() every day at 10:00 ET
 fetch_odds_update   — runs refresh_odds_for_date() every 2 hours between
                       10:00 and 19:00 ET to capture line movement.
 
+update_matchup_data  — runs update_todays_matchup_data() at 11:30 ET and
+                      15:30 ET, 30 min before each generate_daily_picks run,
+                      so H2H + recent-pitcher-form factors are fresh when the
+                      model scores picks.
+
 generate_daily_picks — runs get_daily_picks() at 12:00 ET (after starting
                       lineups typically post) and again at 16:00 ET (to
                       pick up late lineup updates).  The snapshot inside
@@ -35,7 +40,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
 from app.database import AsyncSessionLocal
-from app.services.etl import run_daily_etl, run_live_update
+from app.services.etl import (
+    run_daily_etl,
+    run_live_update,
+    update_todays_matchup_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +147,30 @@ async def _fetch_odds_update_job() -> None:
         logger.exception("Scheduler: fetch_odds_update raised an unhandled exception")
 
 
+async def _update_matchup_data_job() -> None:
+    """
+    Refresh H2H + recent-pitcher-form factors for today's slate.
+
+    Runs at 11:30 and 15:30 ET — 30 minutes ahead of each daily-picks
+    generation — so the model scores against fresh matchup data.
+    update_todays_matchup_data() owns its own session + client and wraps
+    each fetch in try/except, so a few upstream failures won't abort it.
+    """
+    logger.info("Scheduler: update_matchup_data fired")
+    try:
+        stats = await update_todays_matchup_data()
+        logger.info(
+            "Scheduler: update_matchup_data done — %d batters across %d games "
+            "(%d pitchers, %d errors)",
+            stats["batters_updated"],
+            stats["games"],
+            stats["pitchers_logged"],
+            stats["errors"],
+        )
+    except Exception:
+        logger.exception("Scheduler: update_matchup_data raised an unhandled exception")
+
+
 async def _generate_daily_picks_job() -> None:
     """
     Snapshot today's picks to PickHistory.
@@ -216,6 +249,18 @@ def start_scheduler() -> AsyncIOScheduler:
         misfire_grace_time=900,
     )
 
+    # ── Matchup data refresh — 11:30 ET + 15:30 ET ───────────────────────────
+    # 30 min before each picks run so H2H + recent-pitcher-form factors are
+    # fresh when the model scores.
+    scheduler.add_job(
+        _update_matchup_data_job,
+        CronTrigger(hour="11,15", minute=30, timezone=ET),
+        id="update_matchup_data",
+        name="Update Matchup Data (H2H + pitcher form)",
+        replace_existing=True,
+        misfire_grace_time=1_800,
+    )
+
     # ── Daily picks snapshots — 12:00 ET + 16:00 ET ───────────────────────────
     scheduler.add_job(
         _generate_daily_picks_job,
@@ -229,7 +274,8 @@ def start_scheduler() -> AsyncIOScheduler:
     scheduler.start()
     logger.info(
         "Scheduler started — daily ETL @ 06:00 ET, live update q15m, "
-        "odds @ 10:00 + q2h until 19:00, picks @ 12:00 + 16:00"
+        "odds @ 10:00 + q2h until 19:00, matchups @ 11:30 + 15:30, "
+        "picks @ 12:00 + 16:00"
     )
     return scheduler
 

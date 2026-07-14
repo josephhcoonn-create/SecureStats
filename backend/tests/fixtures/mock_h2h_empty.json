@@ -1,0 +1,17 @@
+{
+  "copyright": "Copyright 2026 MLB Advanced Media, L.P.",
+  "stats": [
+    {
+      "type": { "displayName": "vsPlayer" },
+      "group": { "displayName": "hitting" },
+      "totalSplits": 0,
+      "splits": []
+    },
+    {
+      "type": { "displayName": "vsPlayerTotal" },
+      "group": { "displayName": "hitting" },
+      "totalSplits": 0,
+      "splits": []
+    }
+  ]
+}

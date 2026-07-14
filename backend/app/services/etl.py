@@ -21,18 +21,21 @@ Key design choices
 - backfill_date_range()    — bulk-loads historical data.
 """
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal
 from app.models.batting_stats import BattingStats
 from app.models.game import Game
+from app.models.matchup_history import MatchupHistory
+from app.models.pitcher_game_log import PitcherGameLog
 from app.models.pitcher_stats import PitcherStats
 from app.models.player import Player
 from app.services.mlb_client import (
@@ -622,6 +625,292 @@ async def upsert_probable_pitchers(
         target_date,
     )
     return updated
+
+
+# ── Matchup factors ETL: H2H history + recent pitcher form ────────────────────
+#
+# These feed the enhanced hit-probability model's two new factors. All three
+# take ``session`` (and ``mlb``) first to match this file's convention — the
+# orchestrator shares one session + client across the whole batch instead of
+# opening dozens. IDs passed in are MLB ids (what the schedule/roster endpoints
+# return); the new tables FK to our internal ``players.id``, so we resolve and
+# skip any player we haven't ingested yet — same policy as
+# ``upsert_probable_pitchers``. Resolving before the API call also avoids
+# burning requests on bench / minor-league roster names we can't store.
+
+# Spacing between upstream matchup calls (task requirement). The client's
+# token-bucket already caps at ≤10/s; this is extra politeness for the
+# hundreds-of-calls H2H sweep.
+_MATCHUP_CALL_DELAY = 0.15
+
+
+async def _resolve_player_id(session: AsyncSession, mlb_id: int) -> int | None:
+    """Map an MLB player id to our internal ``players.id`` (or None if unseen)."""
+    return (
+        await session.execute(select(Player.id).where(Player.mlb_id == mlb_id))
+    ).scalar_one_or_none()
+
+
+async def update_matchup_history(
+    session: AsyncSession,
+    mlb: MLBClient,
+    batter_mlb_id: int,
+    pitcher_mlb_id: int,
+) -> str:
+    """
+    Fetch and upsert the career head-to-head line for one batter vs one
+    pitcher into ``matchup_history``.
+
+    Returns a status string the orchestrator uses for counting / pacing:
+      - ``"stored"``           — H2H line fetched and upserted (API call made)
+      - ``"no_history"``       — they've never faced each other (API call made)
+      - ``"unknown_batter"``   — batter not in our players table (no API call)
+      - ``"unknown_pitcher"``  — pitcher not in our players table (no API call)
+
+    Never creates a record when there's no shared history.
+    """
+    batter_db_id = await _resolve_player_id(session, batter_mlb_id)
+    if batter_db_id is None:
+        return "unknown_batter"
+    pitcher_db_id = await _resolve_player_id(session, pitcher_mlb_id)
+    if pitcher_db_id is None:
+        return "unknown_pitcher"
+
+    h2h = await mlb.get_batter_vs_pitcher(batter_mlb_id, pitcher_mlb_id)
+    if h2h is None:
+        logger.debug(
+            "H2H batter %d vs pitcher %d: no history — skipping",
+            batter_mlb_id,
+            pitcher_mlb_id,
+        )
+        return "no_history"
+
+    stmt = pg_insert(MatchupHistory).values(
+        batter_id=batter_db_id,
+        pitcher_id=pitcher_db_id,
+        at_bats=h2h["at_bats"],
+        hits=h2h["hits"],
+        home_runs=h2h["home_runs"],
+        strikeouts=h2h["strikeouts"],
+        batting_avg=h2h["batting_avg"],
+        on_base_pct=h2h["on_base_pct"],
+        slugging_pct=h2h["slugging_pct"],
+    )
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_matchup_history_batter_pitcher",
+        set_={
+            "at_bats": stmt.excluded.at_bats,
+            "hits": stmt.excluded.hits,
+            "home_runs": stmt.excluded.home_runs,
+            "strikeouts": stmt.excluded.strikeouts,
+            "batting_avg": stmt.excluded.batting_avg,
+            "on_base_pct": stmt.excluded.on_base_pct,
+            "slugging_pct": stmt.excluded.slugging_pct,
+            "last_updated": func.now(),
+        },
+    )
+    await session.execute(stmt)
+    logger.info(
+        "H2H stored: batter %d vs pitcher %d — %d-for-%d (.%s)",
+        batter_mlb_id,
+        pitcher_mlb_id,
+        h2h["hits"],
+        h2h["at_bats"],
+        f"{h2h['batting_avg']:.3f}"[2:] if h2h["batting_avg"] is not None else "---",
+    )
+    return "stored"
+
+
+async def update_pitcher_game_log(
+    session: AsyncSession,
+    mlb: MLBClient,
+    pitcher_mlb_id: int,
+    num_games: int = 3,
+) -> int:
+    """
+    Fetch a pitcher's recent game log and insert any games not already
+    stored (keyed on the ``(pitcher_id, game_date)`` unique constraint).
+
+    Returns the number of *new* games inserted, or ``-1`` when the pitcher
+    isn't in our players table (unknown — nothing stored).
+    """
+    pitcher_db_id = await _resolve_player_id(session, pitcher_mlb_id)
+    if pitcher_db_id is None:
+        logger.debug(
+            "Pitcher %d not in players table — skipping game log", pitcher_mlb_id
+        )
+        return -1
+
+    form = await mlb.get_pitcher_recent_games(pitcher_mlb_id, num_games=num_games)
+    if form is None:
+        return 0
+
+    new_games = 0
+    for g in form["games"]:
+        if not g["date"]:
+            continue
+        try:
+            game_date = date.fromisoformat(g["date"])
+        except ValueError:
+            continue
+
+        stmt = (
+            pg_insert(PitcherGameLog)
+            .values(
+                pitcher_id=pitcher_db_id,
+                game_id=None,  # MLB game log may reference games outside our table
+                game_date=game_date,
+                opponent=g["opponent"],
+                innings_pitched=g["innings_pitched"],
+                hits_allowed=g["hits_allowed"],
+                earned_runs=g["earned_runs"],
+                walks=g["walks"],
+                strikeouts=g["strikeouts"],
+                era=g["era"],
+                whip=g["whip"],
+            )
+            .on_conflict_do_nothing(
+                constraint="uq_pitcher_game_log_pitcher_date"
+            )
+        )
+        result = await session.execute(stmt)
+        if result.rowcount and result.rowcount > 0:
+            new_games += 1
+
+    logger.info(
+        "Pitcher game log %d: %d new of %d recent games",
+        pitcher_mlb_id,
+        new_games,
+        form["num_games"],
+    )
+    return new_games
+
+
+async def update_todays_matchup_data(target_date: date | None = None) -> dict:
+    """
+    Orchestrator — refresh recent-pitcher form + batter-vs-pitcher H2H for
+    every probable-pitcher matchup on *target_date* (default: today). Meant
+    to run shortly before daily picks are generated.
+
+    For each game with a probable starter:
+      1. update_pitcher_game_log() for that starter, then
+      2. for each position player on the *opposing* team's roster,
+         update_matchup_history(batter, starter).
+
+    The opposing lineup uses the full team roster (filtered to position
+    players) as a stand-in until real lineups post — matching the model's
+    existing ``_likely_starters`` philosophy. Batters we haven't ingested
+    yet are skipped without an API call.
+
+    Every individual fetch is wrapped in try/except and committed in its own
+    transaction so one bad matchup never rolls back the batch. A
+    ``_MATCHUP_CALL_DELAY`` (0.15s) pause follows each upstream call.
+
+    Returns a stats dict for the caller / trigger endpoint.
+    """
+    when = target_date or date.today()
+    stats = {
+        "target_date": str(when),
+        "games": 0,
+        "pitchers_logged": 0,
+        "batters_updated": 0,
+        "no_history": 0,
+        "errors": 0,
+    }
+    start = time.monotonic()
+    logger.info("=== Matchup data update START for %s ===", when)
+
+    async with MLBClient() as mlb, AsyncSessionLocal() as session:
+        # Both are API calls (no DB txn needed yet).
+        schedule = await mlb.get_todays_schedule(when)
+        probables = await mlb.get_probable_pitchers(when)
+
+        # game_id → (home_team_id, away_team_id); ProbablePitcherInfo lacks ids.
+        team_ids: dict[int, tuple[int, int]] = {
+            g["game_id"]: (g["home_team_id"], g["away_team_id"]) for g in schedule
+        }
+
+        games_seen: set[int] = set()
+        for pp in probables:
+            ids = team_ids.get(pp["game_id"])
+            if ids is None:
+                continue
+            home_team_id, away_team_id = ids
+
+            # Each starter faces the OPPOSING team's lineup.
+            pairings = [
+                (pp.get("home_pitcher_id"), away_team_id),
+                (pp.get("away_pitcher_id"), home_team_id),
+            ]
+            for pitcher_mlb_id, opp_team_id in pairings:
+                if pitcher_mlb_id is None:
+                    continue
+                games_seen.add(pp["game_id"])
+
+                # 1. Pitcher recent form
+                try:
+                    async with session.begin():
+                        added = await update_pitcher_game_log(
+                            session, mlb, pitcher_mlb_id
+                        )
+                    if added >= 0:
+                        stats["pitchers_logged"] += 1
+                        await asyncio.sleep(_MATCHUP_CALL_DELAY)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "matchup: pitcher log %d failed: %s", pitcher_mlb_id, exc
+                    )
+                    stats["errors"] += 1
+
+                # 2. Opposing lineup roster (position players only)
+                try:
+                    roster = await mlb.get_team_roster(opp_team_id)
+                    await asyncio.sleep(_MATCHUP_CALL_DELAY)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "matchup: roster %d failed: %s", opp_team_id, exc
+                    )
+                    stats["errors"] += 1
+                    continue
+
+                for entry in roster:
+                    if entry["position"] == "P":
+                        continue  # skip pitchers as batters
+                    try:
+                        async with session.begin():
+                            outcome = await update_matchup_history(
+                                session, mlb, entry["player_id"], pitcher_mlb_id
+                            )
+                        if outcome == "stored":
+                            stats["batters_updated"] += 1
+                            await asyncio.sleep(_MATCHUP_CALL_DELAY)
+                        elif outcome == "no_history":
+                            stats["no_history"] += 1
+                            await asyncio.sleep(_MATCHUP_CALL_DELAY)
+                        # unknown_batter / unknown_pitcher → no API call, no pause
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "matchup: H2H %d vs %d failed: %s",
+                            entry["player_id"],
+                            pitcher_mlb_id,
+                            exc,
+                        )
+                        stats["errors"] += 1
+
+        stats["games"] = len(games_seen)
+
+    stats["duration_seconds"] = round(time.monotonic() - start, 1)
+    logger.info(
+        "Updated matchup data for %d batters across %d games "
+        "(%d pitchers logged, %d no-history, %d errors, %.1fs)",
+        stats["batters_updated"],
+        stats["games"],
+        stats["pitchers_logged"],
+        stats["no_history"],
+        stats["errors"],
+        stats["duration_seconds"],
+    )
+    return stats
 
 
 # ── Public entry points ───────────────────────────────────────────────────────

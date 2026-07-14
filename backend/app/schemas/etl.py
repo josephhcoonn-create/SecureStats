@@ -31,3 +31,22 @@ class OddsTriggerResponse(BaseModel):
     )
     duration_seconds: float
     success: bool
+
+
+class MatchupTriggerResponse(BaseModel):
+    """Result envelope for POST /etl/trigger-matchups."""
+
+    target_date: str
+    games: int = Field(..., description="Games with a probable starter processed.")
+    pitchers_logged: int = Field(
+        ..., description="Probable starters whose recent game log was refreshed."
+    )
+    batters_updated: int = Field(
+        ..., description="Batter-vs-pitcher H2H rows upserted (had shared history)."
+    )
+    no_history: int = Field(
+        ..., description="Batter/pitcher pairs with no shared history (nothing stored)."
+    )
+    errors: int = Field(..., description="Individual fetches that raised and were skipped.")
+    duration_seconds: float
+    success: bool

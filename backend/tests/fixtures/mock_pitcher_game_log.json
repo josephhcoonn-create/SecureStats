@@ -1,0 +1,66 @@
+{
+  "copyright": "Copyright 2026 MLB Advanced Media, L.P.",
+  "stats": [
+    {
+      "type": { "displayName": "gameLog" },
+      "group": { "displayName": "pitching" },
+      "splits": [
+        {
+          "season": "2026",
+          "date": "2026-06-12",
+          "isHome": true,
+          "opponent": { "id": 111, "name": "Boston Red Sox" },
+          "stat": {
+            "inningsPitched": "6.0", "hits": 5, "earnedRuns": 2,
+            "baseOnBalls": 1, "strikeOuts": 7, "battersFaced": 24,
+            "era": "3.00", "whip": "1.00"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-06-18",
+          "isHome": false,
+          "opponent": { "id": 147, "name": "New York Yankees" },
+          "stat": {
+            "inningsPitched": "5.1", "hits": 7, "earnedRuns": 4,
+            "baseOnBalls": 2, "strikeOuts": 5, "battersFaced": 25,
+            "era": "6.75", "whip": "1.69"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-06-24",
+          "isHome": true,
+          "opponent": { "id": 141, "name": "Toronto Blue Jays" },
+          "stat": {
+            "inningsPitched": "7.0", "hits": 3, "earnedRuns": 1,
+            "baseOnBalls": 0, "strikeOuts": 9, "battersFaced": 25,
+            "era": "1.29", "whip": "0.43"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-06-30",
+          "isHome": false,
+          "opponent": { "id": 110, "name": "Baltimore Orioles" },
+          "stat": {
+            "inningsPitched": "6.0", "hits": 6, "earnedRuns": 3,
+            "baseOnBalls": 2, "strikeOuts": 6, "battersFaced": 26,
+            "era": "4.50", "whip": "1.33"
+          }
+        },
+        {
+          "season": "2026",
+          "date": "2026-07-05",
+          "isHome": true,
+          "opponent": { "id": 139, "name": "Tampa Bay Rays" },
+          "stat": {
+            "inningsPitched": "6.0", "hits": 4, "earnedRuns": 2,
+            "baseOnBalls": 1, "strikeOuts": 8, "battersFaced": 23,
+            "era": "3.00", "whip": "0.83"
+          }
+        }
+      ]
+    }
+  ]
+}

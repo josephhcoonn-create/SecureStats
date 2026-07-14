@@ -10,8 +10,16 @@ from app.auth.rbac import TokenPayload, require_role
 from app.config import settings
 from app.database import get_db
 from app.models.user import UserRole
-from app.schemas.etl import ETLTriggerResponse, OddsTriggerResponse
-from app.services.etl import run_daily_etl, run_live_update
+from app.schemas.etl import (
+    ETLTriggerResponse,
+    MatchupTriggerResponse,
+    OddsTriggerResponse,
+)
+from app.services.etl import (
+    run_daily_etl,
+    run_live_update,
+    update_todays_matchup_data,
+)
 from app.services.odds_client import OddsApiError
 from app.services.odds_persistence import refresh_odds_for_date
 
@@ -112,4 +120,40 @@ async def trigger_odds(
         quota_used=result.quota_used,
         duration_seconds=duration,
         success=True,
+    )
+
+
+@router.post(
+    "/trigger-matchups",
+    response_model=MatchupTriggerResponse,
+    summary="Manually refresh H2H + recent-pitcher-form matchup data (admin only)",
+)
+async def trigger_matchups(
+    target_date: Annotated[
+        _date | None,
+        Query(description="Override target date; defaults to today"),
+    ] = None,
+    _: TokenPayload = _admin,
+) -> MatchupTriggerResponse:
+    """
+    Force an out-of-band refresh of the matchup factors — batter-vs-pitcher
+    head-to-head history and each probable starter's recent game log — for
+    the given date's slate. Normally runs on the scheduler at 11:30 and
+    15:30 ET; trigger it here to populate data immediately (e.g. right after
+    deploying these factors, or before a mid-day picks re-run).
+
+    Runs synchronously and can take a minute or two for a full slate, since
+    it fans out one API call per batter/pitcher pairing at a paced ~0.15s.
+    """
+    stats = await update_todays_matchup_data(target_date=target_date)
+
+    return MatchupTriggerResponse(
+        target_date=stats["target_date"],
+        games=stats["games"],
+        pitchers_logged=stats["pitchers_logged"],
+        batters_updated=stats["batters_updated"],
+        no_history=stats["no_history"],
+        errors=stats["errors"],
+        duration_seconds=stats["duration_seconds"],
+        success=stats["errors"] == 0,
     )

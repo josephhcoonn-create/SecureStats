@@ -10,6 +10,13 @@ JSON files
                                           (DraftKings: h2h + spreads + totals,
                                            FanDuel: h2h only — exercises the
                                            "book skipped some markets" branch)
+  mock_h2h_response.json               — /people/{id}/stats?stats=vsPlayer,
+                                          vsPlayerTotal — batter 25 AB, .320 vs a
+                                          pitcher (used by test_matchup_history)
+  mock_h2h_empty.json                  — same endpoint, empty splits (never faced)
+  mock_pitcher_game_log.json           — /people/{id}/stats?stats=gameLog — 5
+                                          recent starts, varied performance
+  mock_pitcher_struggling.json         — game log whose last 3 starts ERA > 6.00
 """
 from __future__ import annotations
 

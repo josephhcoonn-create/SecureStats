@@ -599,23 +599,52 @@ async def get_player_comparison(
 # baseline. Every component falls back to a sensible default when data is
 # missing so the model returns *something* even on a sparse database.
 #
-# Weight schedule (sums to 1.00):
-#   0.30  recent_avg          (last 15 games)
-#   0.15  season_avg          (current calendar year)
-#   0.10  career_avg          (all loaded games)
-#   0.05  home_away_split     (batter's avg in this venue context)
-#   0.30  pitcher_composite   (avg of ERA-derived + WHIP-derived term, plus handedness)
-#   0.10  league_avg          (DB-wide; fallback FALLBACK_LEAGUE_AVG when DB is empty)
+# Weight schedule (sums to 1.00 when H2H is at full weight):
+#   BATTER (0.50):
+#     0.25  recent_avg          (last 15 games)
+#     0.12  season_avg          (current calendar year)
+#     0.08  career_avg          (all loaded games)
+#     0.05  home_away_split     (batter's avg in this venue context)
+#   HEAD-TO-HEAD (0.15, dynamic by sample size — see below):
+#     0.15  h2h_avg             (batter's career avg vs THIS pitcher)
+#   PITCHER (0.25):
+#     0.12  pitcher_recent       (last-3-starts ERA relative to season ERA)
+#     0.08  pitcher_season       (season ERA + WHIP composite)
+#     0.05  handedness_matchup   (opposite/same-hand shift, league-avg scale)
+#   LEAGUE (0.10):
+#     0.10  league_avg          (DB-wide; fallback FALLBACK_LEAGUE_AVG when empty)
+#
+# H2H is weighted by sample size — a 4-for-4 (1.000) means nothing, a
+# 40-for-120 (.333) is gold:
+#   ≥15 AB → full 0.15
+#   5-14 AB → half (0.075); the other 0.075 is redistributed
+#            proportionally across the four batter factors
+#   <5 AB or no data → 0; the full 0.15 is redistributed to batter factors
+# The pitcher (0.25) + league (0.10) weights never move, so the blend
+# always sums to 1.00.
 #
 # Final probability is clamped to [0.05, 0.95] — no certainties.
 
 # Weight constants — exposed so they're easy to tune from one place.
-_W_RECENT = 0.30
-_W_SEASON = 0.15
-_W_CAREER = 0.10
+_W_RECENT = 0.25
+_W_SEASON = 0.12
+_W_CAREER = 0.08
 _W_HOME_AWAY = 0.05
-_W_PITCHER = 0.30
+_W_BATTER_TOTAL = _W_RECENT + _W_SEASON + _W_CAREER + _W_HOME_AWAY  # 0.50
+_W_H2H = 0.15
+_W_PITCHER_RECENT = 0.12
+_W_PITCHER_SEASON = 0.08
+_W_HANDEDNESS = 0.05
 _W_LEAGUE = 0.10
+
+# H2H sample-size gates (at-bats) and the recent-form window.
+_H2H_FULL_AB = 15    # ≥ this → full H2H weight
+_H2H_MIN_AB = 5      # ≥ this (and < full) → half weight; below → ignore
+_PITCHER_RECENT_STARTS = 3   # game-log rows that define "recent form"
+
+# Pitcher recent-vs-season ERA ratios that flag hot/cold form.
+_PITCHER_STRUGGLING_RATIO = 1.3   # recent ERA > season × 1.3 → struggling
+_PITCHER_LOCKED_IN_RATIO = 0.7    # recent ERA < season × 0.7 → locked in
 
 # Handedness matchup modifier — added to pitcher_composite before the
 # 0.30 weight is applied.
@@ -645,12 +674,17 @@ _FALLBACK_ERA = 4.20
 _FALLBACK_WHIP = 1.30
 _FALLBACK_PITCHER_IP = 0.0
 
-# Confidence buckets — see _calculate_confidence for the boost rules.
+# Confidence buckets — see _calculate_confidence for the base + pitcher-IP
+# boost. The H2H / recent-form boosts stack on top inside
+# calculate_enhanced_hit_probability (they need matchup data the pure
+# _calculate_confidence helper doesn't see).
 _CONF_LOW = 30
 _CONF_MEDIUM = 60
 _CONF_HIGH = 85
 _CONF_PITCHER_BOOST = 10
 _CONF_PITCHER_BOOST_MIN_IP = 50
+_CONF_H2H_BOOST = 15          # H2H sample ≥ 15 AB
+_CONF_RECENT_PITCHER_BOOST = 10   # ≥ 3 recent starts logged for the pitcher
 _CONF_MAX = 100
 
 _RECENT_GAMES = 15
@@ -797,6 +831,63 @@ async def _pitcher_factors(
     )
 
 
+async def _matchup_history(
+    session: AsyncSession, batter_id: int, pitcher_id: int
+) -> tuple[float | None, int]:
+    """
+    Cached career H2H line for (batter, pitcher). Returns
+    ``(batting_avg, at_bats)`` — ``(None, 0)`` when the pair has no
+    stored history (never faced, or not yet fetched by the ETL).
+    """
+    from app.models.matchup_history import MatchupHistory  # local — avoids circular
+
+    row = (
+        await session.execute(
+            select(MatchupHistory.batting_avg, MatchupHistory.at_bats).where(
+                MatchupHistory.batter_id == batter_id,
+                MatchupHistory.pitcher_id == pitcher_id,
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return (None, 0)
+    return (row.batting_avg, row.at_bats or 0)
+
+
+async def _pitcher_recent_era(
+    session: AsyncSession, pitcher_id: int, n_starts: int = _PITCHER_RECENT_STARTS
+) -> tuple[float | None, int]:
+    """
+    Recent-form ERA over the pitcher's last *n_starts* logged games.
+
+    Aggregated from raw earned runs / innings (ERA = ΣER / ΣIP × 9) rather
+    than averaging per-game ERAs, so a short outing doesn't skew it.
+    Returns ``(recent_era, num_starts_used)`` — ``(None, 0)`` when there
+    are no game-log rows (or zero innings across them).
+    """
+    from app.models.pitcher_game_log import PitcherGameLog  # local — avoids circular
+
+    rows = (
+        await session.execute(
+            select(
+                PitcherGameLog.innings_pitched,
+                PitcherGameLog.earned_runs,
+            )
+            .where(PitcherGameLog.pitcher_id == pitcher_id)
+            .order_by(PitcherGameLog.game_date.desc())
+            .limit(n_starts)
+        )
+    ).all()
+    if not rows:
+        return (None, 0)
+
+    total_ip = sum(r.innings_pitched or 0.0 for r in rows)
+    total_er = sum(r.earned_runs or 0 for r in rows)
+    if total_ip <= 0:
+        return (None, len(rows))
+    return (round(total_er / total_ip * 9.0, 2), len(rows))
+
+
 # ── Pure helpers ─────────────────────────────────────────────────────────────
 
 
@@ -882,6 +973,15 @@ async def calculate_enhanced_hit_probability(
 
     game = await session.get(Game, game_id) if game_id else None
 
+    # When the caller doesn't name a pitcher but we have the game, resolve
+    # the OPPOSING probable starter so the H2H + pitcher factors engage.
+    # (get_daily_picks relies on this — it passes pitcher_id=None.)
+    if pitcher_id is None and game is not None:
+        if game.home_team == player.team:
+            pitcher_id = game.away_probable_pitcher_id
+        elif game.away_team == player.team:
+            pitcher_id = game.home_probable_pitcher_id
+
     # ── Batter factors ────────────────────────────────────────────────────────
     recent_avg, _recent_ab = await _recent_batting_avg(session, player_id)
     season_avg, season_ab = await _season_batting_avg(session, player_id)
@@ -902,18 +1002,75 @@ async def calculate_enhanced_hit_probability(
     handedness = _handedness_modifier(
         player.bats, pitcher.throws if pitcher else None
     )
-    pitcher_comp = _pitcher_composite(pitcher_era, pitcher_whip, league_avg, handedness)
+    # Season ERA + WHIP composite WITHOUT the handedness shift — handedness
+    # is now its own weighted factor. Passing handedness=0 reuses the
+    # tested _pitcher_composite helper for just the ERA/WHIP blend.
+    pitcher_season_term = _pitcher_composite(
+        pitcher_era, pitcher_whip, league_avg, handedness=0.0
+    )
+
+    # Recent-form term: last-3-starts ERA compared to the pitcher's OWN
+    # season ERA. recent > season → struggling (boost hits); recent <
+    # season → locked in (suppress hits). Falls back to a season-vs-league
+    # term when we don't have ≥3 logged starts.
+    recent_era: float | None = None
+    recent_starts = 0
+    trending: str | None = None
+    season_era_ref = max(pitcher_era, 0.5)
+    if pitcher_id is not None:
+        recent_era, recent_starts = await _pitcher_recent_era(session, pitcher_id)
+    if recent_era is not None and recent_starts >= _PITCHER_RECENT_STARTS:
+        pitcher_recent_term = (recent_era / season_era_ref) * league_avg
+        ratio = recent_era / season_era_ref
+        if ratio > _PITCHER_STRUGGLING_RATIO:
+            trending = "struggling"
+        elif ratio < _PITCHER_LOCKED_IN_RATIO:
+            trending = "locked_in"
+        else:
+            trending = "steady"
+    else:
+        # Not enough recent data — fall back to season ERA vs league baseline.
+        pitcher_recent_term = (season_era_ref / _FALLBACK_ERA) * league_avg
+        recent_era = None  # don't surface a "recent" ERA we didn't measure
+
+    # Handedness as a league-avg-scale factor (its own 0.05 weight).
+    handedness_term = league_avg + handedness
+
+    # ── Head-to-head factor with sample-size-driven dynamic weight ───────────
+    h2h_avg: float | None = None
+    h2h_ab = 0
+    if pitcher_id is not None:
+        h2h_avg, h2h_ab = await _matchup_history(session, player_id, pitcher_id)
+
+    if h2h_avg is not None and h2h_ab >= _H2H_FULL_AB:
+        h2h_weight = _W_H2H
+    elif h2h_avg is not None and h2h_ab >= _H2H_MIN_AB:
+        h2h_weight = _W_H2H / 2.0
+    else:
+        h2h_weight = 0.0
+
+    # Redistribute the unused H2H weight proportionally across batter factors
+    # (their relative split is preserved; only their total grows).
+    redistribute = _W_H2H - h2h_weight
+    batter_scale = 1.0 + (redistribute / _W_BATTER_TOTAL)
+    w_recent = _W_RECENT * batter_scale
+    w_season = _W_SEASON * batter_scale
+    w_career = _W_CAREER * batter_scale
+    w_home_away = _W_HOME_AWAY * batter_scale
 
     # ── Weighted blend with per-component fallbacks ──────────────────────────
     def _or(value: float | None, fallback: float) -> float:
         return value if value is not None else fallback
 
     per_ab = (
-        _W_RECENT     * _or(recent_avg, _or(season_avg, _or(career_avg, league_avg)))
-        + _W_SEASON   * _or(season_avg, _or(career_avg, league_avg))
-        + _W_CAREER   * _or(career_avg, league_avg)
-        + _W_HOME_AWAY * _or(home_away, _or(career_avg, league_avg))
-        + _W_PITCHER  * pitcher_comp
+        w_recent      * _or(recent_avg, _or(season_avg, _or(career_avg, league_avg)))
+        + w_season    * _or(season_avg, _or(career_avg, league_avg))
+        + w_career    * _or(career_avg, league_avg)
+        + w_home_away * _or(home_away, _or(career_avg, league_avg))
+        + h2h_weight  * _or(h2h_avg, league_avg)
+        + _W_PITCHER_RECENT * pitcher_recent_term
+        + _W_PITCHER_SEASON * pitcher_season_term
+        + _W_HANDEDNESS     * handedness_term
         + _W_LEAGUE   * league_avg
     )
     # Clamp per-AB to (0, 1) so the game-level transform stays sane,
@@ -922,7 +1079,14 @@ async def calculate_enhanced_hit_probability(
     per_game = 1.0 - (1.0 - per_ab) ** _EXPECTED_AB_PER_GAME
     probability = max(_PROB_MIN, min(_PROB_MAX, per_game))
 
+    # Base confidence (season AB tier + pitcher-IP boost), then stack the
+    # new matchup-data boosts on top.
     confidence = _calculate_confidence(season_ab, pitcher_ip)
+    if h2h_avg is not None and h2h_ab >= _H2H_FULL_AB:
+        confidence += _CONF_H2H_BOOST
+    if recent_starts >= _PITCHER_RECENT_STARTS:
+        confidence += _CONF_RECENT_PITCHER_BOOST
+    confidence = min(_CONF_MAX, confidence)
 
     return {
         "player_id": player.id,
@@ -945,6 +1109,13 @@ async def calculate_enhanced_hit_probability(
             "pitcher_whip": pitcher_whip if pitcher_id else None,
             "handedness_matchup": handedness,
             "league_avg": round(league_avg, 3),
+            # ── New matchup factors ──
+            "h2h_avg": round(h2h_avg, 3) if h2h_avg is not None else None,
+            "h2h_at_bats": h2h_ab,
+            "h2h_weight_applied": round(h2h_weight, 3),
+            "pitcher_recent_era": recent_era,
+            "pitcher_season_era": pitcher_era if pitcher_id else None,
+            "pitcher_trending": trending,
         },
     }
 
