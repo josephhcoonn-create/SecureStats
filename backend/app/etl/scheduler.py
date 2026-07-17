@@ -27,7 +27,10 @@ generate_daily_picks — runs get_daily_picks() at 12:00 ET (after starting
                       get_daily_picks writes to PickHistory automatically.
 
 All jobs are registered at startup via start_scheduler() and cancelled
-cleanly via stop_scheduler(), called from FastAPI's lifespan context.
+cleanly via stop_scheduler(). These run in a dedicated worker process
+(app/worker.py), NOT the web process — so the API can scale to multiple
+replicas without double-firing cron jobs. (Set RUN_SCHEDULER=true to run
+the scheduler inside the web process instead, for an all-in-one setup.)
 """
 
 import logging

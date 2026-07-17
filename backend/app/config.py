@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     # Logging — "json" for production, "text" for local readability.
     log_format: str = "text"
 
+    # Background scheduler. The APScheduler jobs (daily ETL, live updates,
+    # matchup refresh, daily picks) run in a DEDICATED worker process
+    # (app/worker.py), not inside the web process — so scaling the API to
+    # multiple replicas can't double-fire cron jobs. Default False means the
+    # web app never schedules; set RUN_SCHEDULER=true only for a single
+    # all-in-one process (e.g. local dev without a separate worker).
+    run_scheduler: bool = False
+
     # The Odds API (https://the-odds-api.com) — free tier ships 500
     # requests/month, which comfortably covers a daily MLB pull.
     # If unset, OddsClient refuses to construct and the daily picks

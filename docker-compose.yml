@@ -52,6 +52,29 @@ services:
       retries:      3
       start_period: 15s
 
+  # Dedicated scheduler process — owns all APScheduler jobs (daily ETL,
+  # live updates, matchup refresh, daily picks). Same image as backend,
+  # SERVICE_ROLE=worker so the entrypoint runs app.worker instead of uvicorn.
+  # Keeping this separate from the web service means the API can scale
+  # without cron jobs double-firing. Run exactly ONE replica.
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      SERVICE_ROLE: worker
+    depends_on:
+      db:
+        condition: service_healthy
+      # Wait for the web service (which runs migrations) to be healthy so
+      # the schema exists before any job fires.
+      backend:
+        condition: service_healthy
+    # No HTTP surface — override the image's curl-based healthcheck.
+    healthcheck:
+      disable: true
+
   frontend:
     build:
       context: ./frontend

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 
@@ -20,13 +21,26 @@ from app.middleware.rate_limit import limiter, rate_limit_handler  # noqa: E402
 from app.middleware.security_headers import SecurityHeadersMiddleware  # noqa: E402
 
 configure_logging()
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    start_scheduler()
-    yield
-    stop_scheduler()
+    # The scheduler normally runs in a dedicated worker process
+    # (app/worker.py). Only start it here when explicitly opted in via
+    # RUN_SCHEDULER=true (single all-in-one process, e.g. local dev).
+    if settings.run_scheduler:
+        logger.info("RUN_SCHEDULER=true — starting scheduler in the web process")
+        start_scheduler()
+        try:
+            yield
+        finally:
+            stop_scheduler()
+    else:
+        logger.info(
+            "RUN_SCHEDULER=false — scheduler runs in the worker process, not here"
+        )
+        yield
 
 
 app = FastAPI(
