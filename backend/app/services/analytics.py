@@ -817,7 +817,14 @@ async def _pitcher_factors(
     row = (
         await session.execute(
             select(PitcherStats)
-            .where(PitcherStats.player_id == pitcher_id)
+            # MUST filter to the season-aggregate row: per-game rows carry
+            # NULL era/whip, so without this the query grabs a per-game row
+            # and the pitcher's real ERA/WHIP never enter the model (it
+            # falls back to league baselines for essentially every pitcher).
+            .where(
+                PitcherStats.player_id == pitcher_id,
+                PitcherStats.is_season_aggregate,
+            )
             .order_by(PitcherStats.season.desc())
             .limit(1)
         )
