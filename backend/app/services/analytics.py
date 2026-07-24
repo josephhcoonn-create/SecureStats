@@ -660,13 +660,18 @@ _HANDEDNESS_UNKNOWN = 0.0      # either side missing
 # Threshold history:
 #   0.80 — original brief; achievable only because the ERA term in the
 #          pitcher composite was inverted (good pitchers boosted picks)
-#   0.72 — current; reflects the directionally honest model. A .340
-#          season hitter on a hot streak against a slightly-worse-than-
-#          league-average pitcher lands here. Daily slates surface a
-#          small set of high-conviction matchups rather than zero.
+#   0.72 — directionally honest model, but surfaced ~40-90 picks/slate —
+#          too many for a "high-conviction" product.
+#   0.77 — current; a pick-COUNT decision (not a calibration claim). On the
+#          fixed model (real pitcher ERAs), 0.77 yields ~1 pick/game
+#          (~10-16 on a full slate) instead of dozens. NOTE: the model is
+#          still overconfident (~0.77 predicted ≈ ~0.60 actual on pre-fix
+#          data) — a proper calibration pass on graded POST-fix days will
+#          re-home this number against real hit rates. Until then, treat
+#          the displayed probability as a ranking score, not a true rate.
 _PROB_MIN = 0.05
 _PROB_MAX = 0.95
-DAILY_PICK_THRESHOLD = 0.72
+DAILY_PICK_THRESHOLD = 0.77
 _EXPECTED_AB_PER_GAME = 4  # typical for a starting position player
 
 # League-baseline fallbacks when the DB has nothing better.

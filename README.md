@@ -73,7 +73,7 @@ The dashed **JWT + RBAC** boundary gates every `/api/v1/*` route by user role. T
 - **🔐 Auth & RBAC** — JWT bearer tokens, bcrypt-hashed passwords, three-tier role system (viewer → analyst → admin)
 - **🔄 Automated ETL** — daily 06:00 ET full pull + 15-minute live updates for in-progress games + pitcher boxscore ingestion + probable starter hydration, with savepoint-per-game so one bad box score doesn't poison the run
 - **📊 Real analytics** — batting leaders, hot/cold streak detection (window functions), 95% CI hit-probability estimator
-- **🎯 Multi-factor hit-probability model** — weighted blend of recent / season / career / home-away / opposing pitcher (ERA + WHIP) / handedness matchup → per-AB rate converted to per-game probability via `1 − (1−p)⁴`. Surfaces 2-5 high-conviction "Daily Picks" per slate at the **0.72 game-level threshold + min-50 confidence**
+- **🎯 Multi-factor hit-probability model** — weighted blend of recent / season / career / home-away / opposing pitcher (ERA + WHIP) / handedness matchup → per-AB rate converted to per-game probability via `1 − (1−p)⁴`. Surfaces 2-5 high-conviction "Daily Picks" per slate at the **0.77 game-level threshold + min-50 confidence**
 - **💰 Live betting odds** — every 10 AM + 2-hour line-movement snapshots from The Odds API (free tier: 500 calls/month). Best moneyline per game highlighted across DraftKings / FanDuel / BetMGM / BetRivers / Bovada / etc.
 - **📜 Pick history with self-grading** — every snapshot lands in `pick_history` as `pending`; the next ETL run grades them `hit` / `no_hit` based on actual batting lines. `/picks/accuracy` shows real-world model performance with per-confidence-tier breakdowns
 - **📈 Polished UI** — slate-themed responsive dashboard with sortable tables, expandable rows, Recharts radial gauges and radars, debounced typeaheads, plus **Odds** and **Daily Picks** tabs with circular probability rings
@@ -240,7 +240,7 @@ Full interactive docs live at **http://localhost:8000/docs** (Swagger UI) and **
 ### Picks (`/api/v1/picks/*`) — analyst+
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/picks/today` | Today's high-conviction picks (defaults: 0.72 prob, 50 conf) with each pick's live odds attached. **Snapshots into `pick_history`** on every call (idempotent) |
+| `GET` | `/picks/today` | Today's high-conviction picks (defaults: 0.77 prob, 50 conf) with each pick's live odds attached. **Snapshots into `pick_history`** on every call (idempotent) |
 | `GET` | `/picks/player/{id}` | Run the v2 model for one player against their next probable matchup |
 | `GET` | `/picks/history?days=` | Retrospective per-day accuracy (re-runs the model) |
 | `GET` | `/picks/accuracy?days=` | Snapshot-based accuracy from `pick_history` with confidence-tier breakdown |
@@ -478,7 +478,7 @@ per_game = 1 − (1 − per_ab)^4   ← 4 = expected starting-batter ABs
 prob = clamp(per_game, [0.05, 0.95])
 ```
 
-**Daily pick threshold:** `DAILY_PICK_THRESHOLD = 0.72` — surfaces ~2-5 high-conviction picks per 15-game slate. A .340 season hitter on a hot streak vs a slightly-worse-than-league-average pitcher lands here. Tunable from a single constant in `app/services/analytics.py`.
+**Daily pick threshold:** `DAILY_PICK_THRESHOLD = 0.77` — surfaces ~10-16 high-conviction picks per 15-game slate. A .340 season hitter on a hot streak vs a slightly-worse-than-league-average pitcher lands here. Tunable from a single constant in `app/services/analytics.py`.
 
 **Confidence scoring (0-100):**
 
@@ -490,7 +490,7 @@ prob = clamp(per_game, [0.05, 0.95])
 
 ### Daily picks + self-grading accuracy
 
-- `GET /stats/daily-picks` or `GET /picks/today` runs the v2 model over every batter who appeared in 3+ of their team's last 5 games (heuristic stand-in for real lineups), filters by `min_probability` (default 0.72) + `min_confidence` (default 50), sorts descending.
+- `GET /stats/daily-picks` or `GET /picks/today` runs the v2 model over every batter who appeared in 3+ of their team's last 5 games (heuristic stand-in for real lineups), filters by `min_probability` (default 0.77) + `min_confidence` (default 50), sorts descending.
 - Every pick lands in `pick_history` as `pending` via an idempotent UPSERT keyed on `(player_id, game_id)`. Repeat calls don't duplicate.
 - The **next** daily ETL run grades pending rows whose games went `Final`: looks up the player's batting line, marks `hit` if `hits > 0` else `no_hit`. Players who didn't appear stay `pending` (so a healthy scratch doesn't pollute accuracy stats).
 - `GET /picks/accuracy?days=30` reads from `pick_history` and reports total / correct / accuracy %, plus mean predicted probability for correct vs incorrect groups (does the model over- or under-confidence?), plus a per-confidence-tier breakdown.
