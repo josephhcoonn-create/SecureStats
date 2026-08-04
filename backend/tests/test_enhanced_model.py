@@ -9,7 +9,7 @@ Task 6 — full enhanced-model integration across the new + existing factors.
   6. Edge: a 4-for-4 (1.000) H2H over only 4 AB is ignored, not inflated
 
 Note: the brief references an "80% threshold", but the shipped
-DAILY_PICK_THRESHOLD is a pick-count knob (currently 0.77). These tests
+DAILY_PICK_THRESHOLD is a pick-count knob (currently 0.74). These tests
 assert the *filtering behavior* against the real constant and explicit
 thresholds rather than any hard-coded value.
 """

@@ -662,16 +662,16 @@ _HANDEDNESS_UNKNOWN = 0.0      # either side missing
 #          pitcher composite was inverted (good pitchers boosted picks)
 #   0.72 — directionally honest model, but surfaced ~40-90 picks/slate —
 #          too many for a "high-conviction" product.
-#   0.77 — current; a pick-COUNT decision (not a calibration claim). On the
-#          fixed model (real pitcher ERAs), 0.77 yields ~1 pick/game
-#          (~10-16 on a full slate) instead of dozens. NOTE: the model is
-#          still overconfident (~0.77 predicted ≈ ~0.60 actual on pre-fix
-#          data) — a proper calibration pass on graded POST-fix days will
-#          re-home this number against real hit rates. Until then, treat
-#          the displayed probability as a ranking score, not a true rate.
+#   0.77 — set for the OLD overconfident model; after the playing-time gate +
+#          dynamic AB-count landed (which removed the ~29pt overconfidence),
+#          0.77 became far too strict — often 0-1 picks/slate.
+#   0.74 — current. With the better-calibrated model, 0.74 surfaces ~5
+#          high-conviction picks on a full slate (all established regulars,
+#          no fringe). The A/B showed the fixed model near-calibrated, so the
+#          displayed probability is now much closer to a true rate than before.
 _PROB_MIN = 0.05
 _PROB_MAX = 0.95
-DAILY_PICK_THRESHOLD = 0.77
+DAILY_PICK_THRESHOLD = 0.74
 _EXPECTED_AB_PER_GAME = 4  # fallback when a batter has no season data yet
 
 # Playing-time gate — batters below this many season ABs are too small-
