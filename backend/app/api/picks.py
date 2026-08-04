@@ -32,6 +32,7 @@ from app.schemas.picks import (
 from app.schemas.stats import EnhancedHitProbFactors
 from app.services.analytics import (
     DAILY_PICK_THRESHOLD,
+    _MIN_SEASON_AB,
     calculate_enhanced_hit_probability,
     get_daily_picks,
     get_model_accuracy,
@@ -59,11 +60,17 @@ async def picks_today(
         float, Query(ge=0.0, le=1.0)
     ] = DAILY_PICK_THRESHOLD,
     min_confidence: Annotated[int, Query(ge=0, le=100)] = 50,
+    min_season_ab: Annotated[
+        int,
+        Query(ge=0, description="Playing-time floor: exclude batters below this "
+              "many season ABs (0 disables the gate)."),
+    ] = _MIN_SEASON_AB,
 ) -> PicksTodayResponse:
     raw = await get_daily_picks(
         db,
         min_probability=min_probability,
         min_confidence=min_confidence,
+        min_season_ab=min_season_ab,
         include_factors=True,
     )
 

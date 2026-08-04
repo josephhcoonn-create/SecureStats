@@ -390,7 +390,7 @@ class TestDailyPicksSnapshots:
             await session.commit()
 
             picks_result = await get_daily_picks(
-                session, min_probability=0.50, min_confidence=0
+                session, min_probability=0.50, min_confidence=0, min_season_ab=0
             )
             assert picks_result["picks"], "expected at least one daily pick"
 
@@ -403,7 +403,7 @@ class TestDailyPicksSnapshots:
             assert all(r.actual_result == "pending" for r in rows)
 
             # Second call — no new rows
-            await get_daily_picks(session, min_probability=0.50, min_confidence=0)
+            await get_daily_picks(session, min_probability=0.50, min_confidence=0, min_season_ab=0)
             rows2 = (
                 await session.execute(
                     select(PickHistory).where(PickHistory.game_id == game_today.id)

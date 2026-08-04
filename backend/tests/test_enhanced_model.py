@@ -211,14 +211,40 @@ class TestDailyPicksThreshold:
             )
             await session.commit()
 
+            # min_season_ab=0 disables the playing-time gate — the seed helper
+            # creates only 5 games, below the production floor.
             picks = await get_daily_picks(
-                session, min_probability=DAILY_PICK_THRESHOLD, min_confidence=0
+                session, min_probability=DAILY_PICK_THRESHOLD, min_confidence=0,
+                min_season_ab=0,
             )
         names = {p["player_name"] for p in picks["picks"]}
         assert "B84001" in names        # hot bat clears the threshold
         assert "B84002" not in names    # cold bat filtered out
         # Every surfaced pick is at or above the threshold
         assert all(p["probability"] >= DAILY_PICK_THRESHOLD for p in picks["picks"])
+
+    async def test_playing_time_gate_excludes_small_sample(self) -> None:
+        """A batter below the season-AB floor is gated out by default, but
+        surfaces when min_season_ab=0."""
+        async with TestSessionLocal() as session:
+            # 5 games × 4 AB = 20 season ABs — well under the 150 floor.
+            await _seed_batter(session, mlb_id=86001, team="Gaters", recent_avg=0.450)
+            session.add(
+                Game(
+                    mlb_game_id=860_999, date=TODAY, home_team="Gaters",
+                    away_team="Foes", status="Scheduled",
+                )
+            )
+            await session.commit()
+
+            gated = await get_daily_picks(
+                session, min_probability=0.50, min_confidence=0
+            )
+            ungated = await get_daily_picks(
+                session, min_probability=0.50, min_confidence=0, min_season_ab=0
+            )
+        assert "B86001" not in {p["player_name"] for p in gated["picks"]}
+        assert "B86001" in {p["player_name"] for p in ungated["picks"]}
 
     async def test_raising_threshold_shrinks_set(self) -> None:
         async with TestSessionLocal() as session:

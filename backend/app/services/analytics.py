@@ -672,7 +672,20 @@ _HANDEDNESS_UNKNOWN = 0.0      # either side missing
 _PROB_MIN = 0.05
 _PROB_MAX = 0.95
 DAILY_PICK_THRESHOLD = 0.77
-_EXPECTED_AB_PER_GAME = 4  # typical for a starting position player
+_EXPECTED_AB_PER_GAME = 4  # fallback when a batter has no season data yet
+
+# Playing-time gate — batters below this many season ABs are too small-
+# sample to trust: their averages are noise and they often don't get a full
+# slate of ABs. Backtest (Jul 28–Aug 2): <150-AB picks hit ~10 pts worse
+# (45% vs 55%) while the model rated them HIGHER. Applied at candidate
+# selection in get_daily_picks.
+_MIN_SEASON_AB = 150
+
+# Dynamic expected-ABs bounds. The per-game transform uses each batter's
+# actual season ABs/game instead of a flat 4, so a part-time hitter isn't
+# priced as though he bats four times. Clamped to a sane range.
+_EXPECTED_AB_MIN = 1.5
+_EXPECTED_AB_MAX = 5.0
 
 # League-baseline fallbacks when the DB has nothing better.
 _FALLBACK_ERA = 4.20
@@ -750,6 +763,35 @@ async def _season_batting_avg(
     ab = row.ab or 0
     h = row.h or 0
     return ((h / ab) if ab > 0 else None, ab)
+
+
+async def _expected_abs(session: AsyncSession, player_id: int) -> float:
+    """
+    Batter's average at-bats per game played this season, clamped to
+    [_EXPECTED_AB_MIN, _EXPECTED_AB_MAX]. Feeds the per-AB → per-game
+    transform so a part-time hitter isn't priced as if he bats four times.
+    Falls back to _EXPECTED_AB_PER_GAME when the batter has no season data.
+    """
+    # One batting_stats row per player-game, so a plain COUNT is games played.
+    row = (
+        await session.execute(
+            select(
+                func.count().label("g"),
+                func.coalesce(func.sum(BattingStats.at_bats), 0).label("ab"),
+            )
+            .join(Game, BattingStats.game_id == Game.id)
+            .where(
+                BattingStats.player_id == player_id,
+                Game.status.in_(FINAL_STATUSES),
+                func.extract("year", Game.date) == date.today().year,
+            )
+        )
+    ).one()
+    games = row.g or 0
+    ab = row.ab or 0
+    if games == 0:
+        return float(_EXPECTED_AB_PER_GAME)
+    return max(_EXPECTED_AB_MIN, min(_EXPECTED_AB_MAX, ab / games))
 
 
 async def _career_batting_avg(
@@ -1085,10 +1127,13 @@ async def calculate_enhanced_hit_probability(
         + _W_HANDEDNESS     * handedness_term
         + _W_LEAGUE   * league_avg
     )
-    # Clamp per-AB to (0, 1) so the game-level transform stays sane,
-    # then convert: P(≥1 hit in N ABs) = 1 - (1 - p)^N.
+    # Clamp per-AB to (0, 1) so the game-level transform stays sane, then
+    # convert: P(≥1 hit in N ABs) = 1 - (1 - p)^N, where N is the batter's
+    # OWN expected ABs this game (part-timers get fewer chances, so a lower N
+    # and a lower per-game probability).
     per_ab = max(0.001, min(0.999, per_ab))
-    per_game = 1.0 - (1.0 - per_ab) ** _EXPECTED_AB_PER_GAME
+    expected_abs = await _expected_abs(session, player_id)
+    per_game = 1.0 - (1.0 - per_ab) ** expected_abs
     probability = max(_PROB_MIN, min(_PROB_MAX, per_game))
 
     # Base confidence (season AB tier + pitcher-IP boost), then stack the
@@ -1128,6 +1173,7 @@ async def calculate_enhanced_hit_probability(
             "pitcher_recent_era": recent_era,
             "pitcher_season_era": pitcher_era if pitcher_id else None,
             "pitcher_trending": trending,
+            "expected_abs": round(expected_abs, 2),
         },
     }
 
@@ -1141,6 +1187,7 @@ async def get_daily_picks(
     min_confidence: int = 50,
     target_date: date | None = None,
     include_factors: bool = False,
+    min_season_ab: int = _MIN_SEASON_AB,
 ) -> dict:
     """
     For every batter on every team playing on *target_date* (defaults to
@@ -1201,6 +1248,30 @@ async def get_daily_picks(
         seen.add(key)
         deduped.append((player, game))
     candidates = deduped
+
+    # ── Playing-time gate ────────────────────────────────────────────────────
+    # Drop small-sample batters (< min_season_ab season ABs). Their averages
+    # are noise and they often don't get a full slate of ABs, so they were
+    # systematically overrated — backtest showed <150-AB picks hitting ~10 pts
+    # worse than regulars. One batched query keeps this cheap. Pass
+    # min_season_ab=0 to disable (used by tests with small-sample fixtures).
+    if candidates and min_season_ab > 0:
+        cand_ids = {p.id for p, _ in candidates}
+        eligible_rows = (
+            await session.execute(
+                select(BattingStats.player_id)
+                .join(Game, BattingStats.game_id == Game.id)
+                .where(
+                    BattingStats.player_id.in_(cand_ids),
+                    Game.status.in_(FINAL_STATUSES),
+                    func.extract("year", Game.date) == when.year,
+                )
+                .group_by(BattingStats.player_id)
+                .having(func.coalesce(func.sum(BattingStats.at_bats), 0) >= min_season_ab)
+            )
+        ).scalars().all()
+        eligible = set(eligible_rows)
+        candidates = [(p, g) for p, g in candidates if p.id in eligible]
 
     # Run the model on every candidate
     evaluated = 0

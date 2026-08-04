@@ -475,7 +475,9 @@ class TestPicksToday:
     ) -> None:
         resp = await client.get(
             "/api/v1/picks/today",
-            params={"min_probability": 0.85, "min_confidence": 30},
+            # min_season_ab=0 disables the playing-time gate — the fixture
+            # seeds a small-sample batter below the production floor.
+            params={"min_probability": 0.85, "min_confidence": 30, "min_season_ab": 0},
             headers={"Authorization": f"Bearer {_analyst_token()}"},
         )
         assert resp.status_code == 200, resp.text

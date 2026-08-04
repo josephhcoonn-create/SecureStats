@@ -361,8 +361,10 @@ class TestDailyPicks:
             # Threshold high enough to filter out the .000 cold bat
             # (whose game-level prob is dragged up by the pitcher term
             # but still well under a real hit hitter's number).
+            # min_season_ab=0 disables the playing-time gate — this fixture
+            # seeds only 5 games, so the batters are below the production floor.
             result = await get_daily_picks(
-                session, min_probability=0.85, min_confidence=30
+                session, min_probability=0.85, min_confidence=30, min_season_ab=0
             )
         assert result["games_considered"] == 1
         assert result["candidates_evaluated"] >= 1
